@@ -710,12 +710,12 @@ protected:
         HandledFirstNonOverlappingEmptyField(false),
         FirstNearlyEmptyVBase(nullptr) {}
 
-  void Layout(const RecordDecl *D);
-  void Layout(const CXXRecordDecl *D);
-  void Layout(const ObjCInterfaceDecl *D);
+  void Layout(const RecordDecl *D, const SourceManager &SM);
+  void Layout(const CXXRecordDecl *D, const SourceManager &SM);
+  void Layout(const ObjCInterfaceDecl *D, const SourceManager &SM);
 
-  void LayoutFields(const RecordDecl *D);
-  void LayoutField(const FieldDecl *D, bool InsertExtraPadding);
+  void LayoutFields(const RecordDecl *D, const SourceManager &SM);
+  void LayoutField(const FieldDecl *D, bool InsertExtraPadding, bool bigfoot_valid_field = false);
   void LayoutWideBitField(uint64_t FieldSize, uint64_t StorageUnitSize,
                           bool FieldPacked, const FieldDecl *D);
   void LayoutBitField(const FieldDecl *D);
@@ -1877,7 +1877,8 @@ void ItaniumRecordLayoutBuilder::LayoutBitField(const FieldDecl *D) {
 
 //GAD | Laying out individual field
 void ItaniumRecordLayoutBuilder::LayoutField(const FieldDecl *D,
-                                             bool InsertExtraPadding) {
+                                             bool InsertExtraPadding,
+                                             bool bigfoot_valid_field) {
   auto *FieldClass = D->getType()->getAsCXXRecordDecl();
   bool PotentiallyOverlapping = D->hasAttr<NoUniqueAddressAttr>() && FieldClass;
   bool IsOverlappingEmptyField =
@@ -3535,7 +3536,7 @@ ASTContext::getObjCLayout(const ObjCInterfaceDecl *D,
   ItaniumRecordLayoutBuilder Builder(*this, /*EmptySubobjects=*/nullptr);
   Builder.Layout(D, sourceManager);
 
-  const ASTRecordLayout *NewEntry = 
+  const ASTRecordLayout *NewEntry =
     new (*this) ASTRecordLayout(*this, Builder.getSize(), Builder.Alignment, Builder.PreferredAlignment,
                                 Builder.UnadjustedAlignment,
                                 /*RequiredAlignment : used by MS-ABI)*/
