@@ -21,6 +21,9 @@
 #include "llvm/Support/Format.h"
 #include "llvm/Support/MathExtras.h"
 
+#include <cstdlib>
+#include <iostream>
+
 using namespace clang;
 
 namespace {
@@ -1369,22 +1372,22 @@ void ItaniumRecordLayoutBuilder::InitializeLayout(const Decl *D) {
     }
 }
 
-void ItaniumRecordLayoutBuilder::Layout(const RecordDecl *D) {
+void ItaniumRecordLayoutBuilder::Layout(const RecordDecl *D, const SourceManager &SM) {
   InitializeLayout(D);
-  LayoutFields(D);
+  LayoutFields(D, SM);
 
   // Finally, round the size of the total struct up to the alignment of the
   // struct itself.
   FinishLayout(D);
 }
 
-void ItaniumRecordLayoutBuilder::Layout(const CXXRecordDecl *RD) {
+void ItaniumRecordLayoutBuilder::Layout(const CXXRecordDecl *RD, const SourceManager &SM) {
   InitializeLayout(RD);
 
   // Lay out the vtable and the non-virtual bases.
   LayoutNonVirtualBases(RD);
 
-  LayoutFields(RD);
+  LayoutFields(RD, SM);
 
   NonVirtualSize = Context.toCharUnitsFromBits(
       llvm::alignTo(getSizeInBits(), Context.getTargetInfo().getCharAlign()));
@@ -1418,7 +1421,7 @@ void ItaniumRecordLayoutBuilder::Layout(const CXXRecordDecl *RD) {
 #endif
 }
 
-void ItaniumRecordLayoutBuilder::Layout(const ObjCInterfaceDecl *D) {
+void ItaniumRecordLayoutBuilder::Layout(const ObjCInterfaceDecl *D, const SourceManager &SM) {
   if (ObjCInterfaceDecl *SD = D->getSuperClass()) {
     const ASTRecordLayout &SL = Context.getASTObjCInterfaceLayout(SD);
 
@@ -1441,16 +1444,40 @@ void ItaniumRecordLayoutBuilder::Layout(const ObjCInterfaceDecl *D) {
   FinishLayout(D);
 }
 
-void ItaniumRecordLayoutBuilder::LayoutFields(const RecordDecl *D) {
+void ItaniumRecordLayoutBuilder::LayoutFields(const RecordDecl *D, const SourceManager &SM) {
   // Layout each field, for now, just sequentially, respecting alignment.  In
   // the future, this will need to be tweakable by targets.
   bool InsertExtraPadding = D->mayInsertExtraPadding(/*EmitRemark=*/true);
   bool HasFlexibleArrayMember = D->hasFlexibleArrayMember();
+
+  //GAD + print the decl we are bigfoot-ing and check for validity in code
+  auto def = D->getDefinition();
+  auto sourceRange = def->getSourceRange();
+  bool bigfoot_valid_record = true;
+
+  if (sourceRange.isInvalid()) {
+      llvm::errs() << "AHHH! Invalid source loc, bigfoot will skip...\n";
+      bigfoot_valid_record = false;
+  }
+
+  if (auto nd = llvm::dyn_cast<NamedDecl>(D)) {
+      llvm::errs() << "Found ( " << nd->getQualifiedNameAsString() << " ) at " ;
+  }
+  sourceRange.dump(SM);
+
+  auto srcString = sourceRange.printToString(SM);
+  /* llvm::errs() << "Source Location: " << srcString << " \n"; */
+  if (srcString.find("/usr") != std::string::npos) {
+      llvm::errs() << "AHHH! Standard library record, bigfoot will skip...\n";
+      bigfoot_valid_record = false;
+  }
+  //GAD - print the decl we are bigfoot-ing
+
   for (auto I = D->field_begin(), End = D->field_end(); I != End; ++I) {
     auto Next(I);
     ++Next;
     LayoutField(*I,
-                InsertExtraPadding && (Next != End || !HasFlexibleArrayMember));
+                InsertExtraPadding && (Next != End || !HasFlexibleArrayMember), bigfoot_valid_record);
   }
 }
 
@@ -1848,6 +1875,7 @@ void ItaniumRecordLayoutBuilder::LayoutBitField(const FieldDecl *D) {
                   Context.toCharUnitsFromBits(UnpackedFieldAlign));
 }
 
+//GAD | Laying out individual field
 void ItaniumRecordLayoutBuilder::LayoutField(const FieldDecl *D,
                                              bool InsertExtraPadding) {
   auto *FieldClass = D->getType()->getAsCXXRecordDecl();
@@ -2045,8 +2073,19 @@ void ItaniumRecordLayoutBuilder::LayoutField(const FieldDecl *D,
     UnpackedFieldAlign = std::min(UnpackedFieldAlign, MaxFieldAlignment);
   }
 
+  //GAD + Aligning fields to alignment provided by env
+  int bigfoot_alignment = atoi(std::getenv("BIGFOOT_ALIGN"));
+  if (bigfoot_valid_field && bigfoot_alignment > 0) {
+    std::cout << "Aligning field to " << bigfoot_alignment << std::endl;
+    CharUnits BigfootAlignment = CharUnits::fromQuantity(bigfoot_alignment);
+    FieldAlign = BigfootAlignment;
+  }
+  //GAD - Aligning fields to alignment provided by env (the statement below
+  //      may end up being a problem for us later, if so, easy fix)
+
   CharUnits AlignTo =
       !DefaultsToAIXPowerAlignment ? FieldAlign : PreferredAlign;
+
   // Round up the current record size to the field's alignment boundary.
   FieldOffset = FieldOffset.alignTo(AlignTo);
   UnpackedFieldOffset = UnpackedFieldOffset.alignTo(UnpackedFieldAlign);
@@ -3308,10 +3347,11 @@ ASTContext::getASTRecordLayout(const RecordDecl *D) const {
           Builder.FieldOffsets);
     }
   } else {
+    auto &sourceManager = getSourceManager();
     if (const auto *RD = dyn_cast<CXXRecordDecl>(D)) {
       EmptySubobjectMap EmptySubobjects(*this, RD);
       ItaniumRecordLayoutBuilder Builder(*this, &EmptySubobjects);
-      Builder.Layout(RD);
+      Builder.Layout(RD, sourceManager);
 
       // In certain situations, we are allowed to lay out objects in the
       // tail-padding of base classes.  This is ABI-dependent.
@@ -3337,7 +3377,7 @@ ASTContext::getASTRecordLayout(const RecordDecl *D) const {
           Builder.VBases);
     } else {
       ItaniumRecordLayoutBuilder Builder(*this, /*EmptySubobjects=*/nullptr);
-      Builder.Layout(D);
+      Builder.Layout(D, sourceManager);
 
       NewEntry = new (*this) ASTRecordLayout(
           *this, Builder.getSize(), Builder.Alignment,
@@ -3491,14 +3531,15 @@ ASTContext::getObjCLayout(const ObjCInterfaceDecl *D,
       return getObjCLayout(D, nullptr);
   }
 
+  auto &sourceManager = getSourceManager();
   ItaniumRecordLayoutBuilder Builder(*this, /*EmptySubobjects=*/nullptr);
-  Builder.Layout(D);
+  Builder.Layout(D, sourceManager);
 
-  const ASTRecordLayout *NewEntry = new (*this) ASTRecordLayout(
-      *this, Builder.getSize(), Builder.Alignment, Builder.PreferredAlignment,
-      Builder.UnadjustedAlignment,
-      /*RequiredAlignment : used by MS-ABI)*/
-      Builder.Alignment, Builder.getDataSize(), Builder.FieldOffsets);
+  const ASTRecordLayout *NewEntry = 
+    new (*this) ASTRecordLayout(*this, Builder.getSize(), Builder.Alignment, Builder.PreferredAlignment,
+                                Builder.UnadjustedAlignment,
+                                /*RequiredAlignment : used by MS-ABI)*/
+                                Builder.Alignment, Builder.getDataSize(), Builder.FieldOffsets);
 
   ObjCLayouts[Key] = NewEntry;
 
@@ -3679,11 +3720,12 @@ static void DumpRecordLayout(raw_ostream &OS, const RecordDecl *RD,
   OS << "]\n";
 }
 
-void ASTContext::DumpRecordLayout(const RecordDecl *RD, raw_ostream &OS,
+void ASTContext::DumpRecordLayout(const RecordDecl *RD,
+                                  raw_ostream &OS,
                                   bool Simple) const {
   if (!Simple) {
     ::DumpRecordLayout(OS, RD, *this, CharUnits(), 0, nullptr,
-                       /*PrintSizeInfo*/ true,
+                       /*PrintSizeInfo*/true,
                        /*IncludeVirtualBases=*/true);
     return;
   }
@@ -3708,8 +3750,7 @@ void ASTContext::DumpRecordLayout(const RecordDecl *RD, raw_ostream &OS,
        << "\n";
   OS << "  FieldOffsets: [";
   for (unsigned i = 0, e = Info.getFieldCount(); i != e; ++i) {
-    if (i)
-      OS << ", ";
+    if (i) OS << ", ";
     OS << Info.getFieldOffset(i);
   }
   OS << "]>\n";
