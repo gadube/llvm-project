@@ -71,8 +71,8 @@ pythonenv*
 /lldb/docs/python_api/
 
 # install directories
-bin/
-include/
-lib/
-libexec/
-share/
+/bin/
+/include/
+/lib/
+/libexec/
+/share/
