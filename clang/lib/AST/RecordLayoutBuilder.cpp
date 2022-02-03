@@ -23,6 +23,8 @@
 
 #include <cstdlib>
 #include <iostream>
+#include <vector>
+#include <regex>
 
 using namespace clang;
 
@@ -691,6 +693,18 @@ protected:
   /// Valid if UseExternalLayout is true.
   ExternalLayout External;
 
+  /// bigfoot_blacklist - Blacklist of header locations for application of
+  /// padding to records
+  std::vector<std::string> bigfoot_blacklist;
+
+  /// bigfoot_valid_record - flag to determine whether or not to pad a given
+  /// field of a record
+  bool bigfoot_valid_field;
+
+  /// bigfoot_alignment - bytes alignment of additional padding for all
+  /// fields of a record
+  int bigfoot_alignment;
+
   ItaniumRecordLayoutBuilder(const ASTContext &Context,
                              EmptySubobjectMap *EmptySubobjects)
       : Context(Context), EmptySubobjects(EmptySubobjects), Size(0),
@@ -708,14 +722,32 @@ protected:
         PaddedFieldSize(CharUnits::Zero()), PrimaryBase(nullptr),
         PrimaryBaseIsVirtual(false), HasOwnVFPtr(false), HasPackedField(false),
         HandledFirstNonOverlappingEmptyField(false),
-        FirstNearlyEmptyVBase(nullptr) {}
+        FirstNearlyEmptyVBase(nullptr) {
+            if (char* bigfoot_alignment_env = std::getenv("BIGFOOT_ALIGN")) {
+                bigfoot_alignment = atoi(bigfoot_alignment_env);
+            } else {
+                bigfoot_alignment = 0;
+            }
+            if (char* bigfoot_blacklist_env = std::getenv("BIGFOOT_BLACKLIST")) {
+                std::regex delim("\\;");
+                std::string s(bigfoot_blacklist_env);
+                bigfoot_blacklist = std::vector<std::string>(
+                        std::sregex_token_iterator(s.begin(), s.end(), delim, - 1),
+                        std::sregex_token_iterator()
+                        );
+            } else {
+                llvm::errs() << "BIGFOOT_BLACKLIST not specified, using default: \"/usr;/opt\"\n";
+                bigfoot_blacklist.push_back("/usr");
+                bigfoot_blacklist.push_back("/opt");
+            }
+        }
 
   void Layout(const RecordDecl *D, const SourceManager &SM);
   void Layout(const CXXRecordDecl *D, const SourceManager &SM);
   void Layout(const ObjCInterfaceDecl *D, const SourceManager &SM);
 
   void LayoutFields(const RecordDecl *D, const SourceManager &SM);
-  void LayoutField(const FieldDecl *D, bool InsertExtraPadding, bool bigfoot_valid_field = false);
+  void LayoutField(const FieldDecl *D, bool InsertExtraPadding);
   void LayoutWideBitField(uint64_t FieldSize, uint64_t StorageUnitSize,
                           bool FieldPacked, const FieldDecl *D);
   void LayoutBitField(const FieldDecl *D);
@@ -815,7 +847,7 @@ protected:
   void setSize(CharUnits NewSize) { Size = Context.toBits(NewSize); }
   void setSize(uint64_t NewSize) { Size = NewSize; }
 
-  CharUnits getAligment() const { return Alignment; }
+  CharUnits getAlignment() const { return Alignment; }
 
   CharUnits getDataSize() const {
     assert(DataSize % Context.getCharWidth() == 0);
@@ -1451,13 +1483,13 @@ void ItaniumRecordLayoutBuilder::LayoutFields(const RecordDecl *D, const SourceM
   bool HasFlexibleArrayMember = D->hasFlexibleArrayMember();
 
   //GAD + print the decl we are bigfoot-ing and check for validity in code
+  bigfoot_valid_field = true;
   auto def = D->getDefinition();
   auto sourceRange = def->getSourceRange();
-  bool bigfoot_valid_record = true;
 
   if (sourceRange.isInvalid()) {
-      llvm::errs() << "AHHH! Invalid source loc, bigfoot will skip...\n";
-      bigfoot_valid_record = false;
+      llvm::errs() << "AHHH! Invalid source location, bigfoot will skip...\n";
+      bigfoot_valid_field = false;
   }
 
   if (auto nd = llvm::dyn_cast<NamedDecl>(D)) {
@@ -1466,18 +1498,19 @@ void ItaniumRecordLayoutBuilder::LayoutFields(const RecordDecl *D, const SourceM
   sourceRange.dump(SM);
 
   auto srcString = sourceRange.printToString(SM);
-  /* llvm::errs() << "Source Location: " << srcString << " \n"; */
-  if (srcString.find("/usr") != std::string::npos) {
-      llvm::errs() << "AHHH! Standard library record, bigfoot will skip...\n";
-      bigfoot_valid_record = false;
+
+  for (auto &s : bigfoot_blacklist) {
+      if (srcString.find(s) != std::string::npos) {
+          llvm::errs() << "AHHH! Standard library record, bigfoot will skip...\n";
+          bigfoot_valid_field = false;
+      }
   }
   //GAD - print the decl we are bigfoot-ing
 
   for (auto I = D->field_begin(), End = D->field_end(); I != End; ++I) {
     auto Next(I);
     ++Next;
-    LayoutField(*I,
-                InsertExtraPadding && (Next != End || !HasFlexibleArrayMember), bigfoot_valid_record);
+    LayoutField(*I, InsertExtraPadding && (Next != End || !HasFlexibleArrayMember));
   }
 }
 
@@ -1877,8 +1910,7 @@ void ItaniumRecordLayoutBuilder::LayoutBitField(const FieldDecl *D) {
 
 //GAD | Laying out individual field
 void ItaniumRecordLayoutBuilder::LayoutField(const FieldDecl *D,
-                                             bool InsertExtraPadding,
-                                             bool bigfoot_valid_field) {
+                                             bool InsertExtraPadding) {
   auto *FieldClass = D->getType()->getAsCXXRecordDecl();
   bool PotentiallyOverlapping = D->hasAttr<NoUniqueAddressAttr>() && FieldClass;
   bool IsOverlappingEmptyField =
@@ -2075,11 +2107,11 @@ void ItaniumRecordLayoutBuilder::LayoutField(const FieldDecl *D,
   }
 
   //GAD + Aligning fields to alignment provided by env
-  int bigfoot_alignment = atoi(std::getenv("BIGFOOT_ALIGN"));
   if (bigfoot_valid_field && bigfoot_alignment > 0) {
     std::cout << "Aligning field to " << bigfoot_alignment << std::endl;
     CharUnits BigfootAlignment = CharUnits::fromQuantity(bigfoot_alignment);
     FieldAlign = BigfootAlignment;
+    PreferredAlign = BigfootAlignment;
   }
   //GAD - Aligning fields to alignment provided by env (the statement below
   //      may end up being a problem for us later, if so, easy fix)
