@@ -736,7 +736,7 @@ protected:
                         std::sregex_token_iterator()
                         );
             } else {
-                llvm::errs() << "BIGFOOT_BLACKLIST not specified, using default: \"/usr;/opt\"\n";
+                /* llvm::errs() << "BIGFOOT_BLACKLIST not specified, using default: \"/usr;/opt\"\n"; */
                 bigfoot_blacklist.push_back("/usr");
                 bigfoot_blacklist.push_back("/opt");
             }
@@ -1486,25 +1486,27 @@ void ItaniumRecordLayoutBuilder::LayoutFields(const RecordDecl *D, const SourceM
   bigfoot_valid_field = true;
   auto def = D->getDefinition();
   auto sourceRange = def->getSourceRange();
+  auto srcString = sourceRange.printToString(SM);
 
   if (sourceRange.isInvalid()) {
-      llvm::errs() << "AHHH! Invalid source location, bigfoot will skip...\n";
+      llvm::errs() << "===> Invalid source location, bigfoot will skip...\n";
       bigfoot_valid_field = false;
   }
 
-  if (auto nd = llvm::dyn_cast<NamedDecl>(D)) {
-      llvm::errs() << "Found ( " << nd->getQualifiedNameAsString() << " ) at " ;
-  }
-  sourceRange.dump(SM);
-
-  auto srcString = sourceRange.printToString(SM);
-
   for (auto &s : bigfoot_blacklist) {
       if (srcString.find(s) != std::string::npos) {
-          llvm::errs() << "AHHH! Standard library record, bigfoot will skip...\n";
+          llvm::errs() << "===> Blacklisted record, bigfoot will skip...\n";
           bigfoot_valid_field = false;
+          break;
       }
   }
+
+  if (bigfoot_valid_field) {
+      auto nd = llvm::dyn_cast<NamedDecl>(D);
+      if (nd) llvm::errs() << "Found ( " << nd->getQualifiedNameAsString() << " ) at " ;
+      sourceRange.dump(SM);
+  }
+
   //GAD - print the decl we are bigfoot-ing
 
   for (auto I = D->field_begin(), End = D->field_end(); I != End; ++I) {
