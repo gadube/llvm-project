@@ -1495,7 +1495,9 @@ void ItaniumRecordLayoutBuilder::LayoutFields(const RecordDecl *D, const SourceM
 
   for (auto &s : bigfoot_blacklist) {
       if (srcString.find(s) != std::string::npos) {
-          llvm::errs() << "===> Blacklisted record, bigfoot will skip...\n";
+          auto nd = llvm::dyn_cast<NamedDecl>(D);
+          llvm::errs() << "===> Blacklisted record ( " << nd->getQualifiedNameAsString();
+          llvm::errs() << " ) at " << srcString << ", bigfoot will skip...\n";
           bigfoot_valid_field = false;
           break;
       }
@@ -1503,8 +1505,10 @@ void ItaniumRecordLayoutBuilder::LayoutFields(const RecordDecl *D, const SourceM
 
   if (bigfoot_valid_field) {
       auto nd = llvm::dyn_cast<NamedDecl>(D);
-      if (nd) llvm::errs() << "Found ( " << nd->getQualifiedNameAsString() << " ) at " ;
-      sourceRange.dump(SM);
+      if (nd) {
+          llvm::errs() << "Found ( " << nd->getQualifiedNameAsString() << " ) at ";
+          llvm::errs() << srcString << "\n";
+      }
   }
 
   //GAD - print the decl we are bigfoot-ing
